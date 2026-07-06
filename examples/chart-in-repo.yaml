@@ -1,0 +1,59 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: demo
+  namespace: argocd
+spec:
+  syncPolicy:
+    preserveResourcesOnDeletion: false
+
+  generators:
+    - git:
+        repoURL: http://example/group/repo.git
+        revision: main
+        files:
+          - path: argocd-manifests/demo/*/values.yaml
+
+  template:
+    metadata:
+      name: 'nginx-{{path.basename}}'
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io/foreground
+    spec:
+      project: default
+
+      source:
+        repoURL: http://example/group/repo.git
+        targetRevision: main
+        path: '.'
+        plugin:
+          name: helm-secrets
+          env:
+            - name: VALUES_PATHS
+              value: >
+                argocd-manifests/demo/values.yaml,
+                argocd-manifests/demo/{{path.basename}}/values.yaml
+            - name: SECRET_PATHS
+              value: >
+                argocd-manifests/demo/{{path.basename}}/secrets.yaml,
+                argocd-manifests/demo/{{path.basename}}/secrets.yaml-non-exist
+            - name: CHART_PATH
+              value: argocd-manifests/charts/java
+
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{path.basename}}'
+
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m

@@ -1,0 +1,116 @@
+global:
+  domain: argocd.local
+
+configs:
+  params:
+    server.insecure: true
+
+  cmp:
+    create: true
+    plugins:
+      helm-secrets:
+        generate:
+          command: [sh, -c]
+          args:
+            - |
+              helm_value_args() {
+                local args=""
+                for path in $(echo "${1:-}" | tr ',' ' '); do
+                  if [ -f "${path}" ]; then
+                    args="${args} -f ${2:-}${path}"
+                  fi
+                done
+                echo ${args}
+              }
+
+              if [ -n "${ARGOCD_ENV_CHART_VERSION:-}" ]; then
+                export HOME="$(mktemp -d ./tmp_chart.XXXXXX)"
+
+                helm pull \
+                  --repo "${ARGOCD_ENV_CHART_REGISTRY_URL}" \
+                  --username "${GITLAB_ARGO_USERNAME}" \
+                  --password "${GITLAB_ARGO_PASSWORD}" \
+                  --version "${ARGOCD_ENV_CHART_VERSION}" \
+                  --untar --untardir "${HOME}" \
+                  ${ARGOCD_ENV_CHART_NAME} >&2
+                chart_path="${HOME}/${ARGOCD_ENV_CHART_NAME}"
+              else
+                helm dependency build "${ARGOCD_ENV_CHART_PATH}" >&2
+                chart_path="${ARGOCD_ENV_CHART_PATH}"
+              fi
+
+              helm secrets template \
+                --include-crds \
+                --release-name "${ARGOCD_APP_NAME}" \
+                --namespace "${ARGOCD_APP_NAMESPACE}" \
+                $(helm_value_args "${ARGOCD_ENV_VALUES_PATHS}") \
+                $(helm_value_args "${ARGOCD_ENV_SECRET_PATHS}" "secrets://") \
+                "${chart_path}"
+        discover:
+          fileName: "./.sops.yaml"
+
+server:
+  replicas: 1
+  service:
+    type: ClusterIP
+  ingress:
+    enabled: false
+
+controller:
+  replicas: 1
+
+applicationSet:
+  replicas: 1
+
+redis-ha:
+  enabled: false
+redis:
+  enabled: true
+
+dex:
+  enabled: false
+
+notifications:
+  enabled: false
+
+repoServer:
+  replicas: 1
+
+  # CMP sidecar. The argocd-cmp-server binary is provided by the chart's
+  # `copyutil` init container at /var/run/argocd/argocd-cmp-server.
+  extraContainers:
+    - name: helm-secrets
+      image: argo-cmp
+      imagePullPolicy: Never
+      command:
+        - /var/run/argocd/argocd-cmp-server
+      args: [--loglevel, debug]
+      envFrom:
+        - secretRef:
+            name: aws-jenkins-user-credential
+      env:
+        - name: GITLAB_ARGO_USERNAME
+          value: argo
+        - name: GITLAB_ARGO_PASSWORD
+          value: glpat-********************
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+      volumeMounts:
+        - mountPath: /var/run/argocd
+          name: var-files
+        - mountPath: /home/argocd/cmp-server/plugins
+          name: plugins
+        - mountPath: /home/argocd/cmp-server/config/plugin.yaml
+          subPath: helm-secrets.yaml
+          name: argocd-cmp-cm
+        - mountPath: /tmp
+          name: helm-secrets-tmp
+
+  volumes:
+    - name: argocd-cmp-cm
+      configMap:
+        name: argocd-cmp-cm
+    - name: helm-secrets-tmp
+      emptyDir: {}
